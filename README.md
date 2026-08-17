@@ -140,40 +140,6 @@ graphoelements.
 
 ---
 
-## Repository layout
-
-```
-models/
-  sleepgth.py           end-to-end model assembly and cross-epoch context
-  spatial_encoder.py    multi-scale CNN, electrode graph, masked graph attention
-  temporal_vit.py       within-epoch temporal transformer
-datasets/
-  cinc2018.py           CinC 2018 epoch dataset with subject-level splitting
-  augment.py            signal-space augmentations
-losses/
-  classification.py     weighted cross-entropy / focal loss
-engine/
-  train.py              train & evaluate loops
-scripts/
-  train_single.py       training entry point
-  test_random.py        evaluate on randomly sampled held-out subjects
-  visualize_attention.py extract the attention figures shown above
-  subset_cache.py       build a smaller cache for quick experiments
-utils/
-  scheduler.py          warmup + cosine schedule
-```
-
----
-
-## Setup
-
-```bash
-git clone https://github.com/n0203017888/SleepGTH.git
-cd SleepGTH
-pip install -r requirements.txt
-```
-
-Tested on Python 3.10 with PyTorch 2.4 (CUDA).
 
 ### Data
 
@@ -185,43 +151,7 @@ bandpass-filters them and stores one array per recording:
 python -m datasets.cinc2018 --data-root <PATH_TO_CinC2018>/training --out-dir ./cache_dataset
 ```
 
-The cache is large (hundreds of GB for the full set) and is not tracked by git.
-`scripts/subset_cache.py` builds a smaller subset for quick iteration.
 
-### Train
-
-```bash
-python scripts/train_single.py --cache-dir ./cache_dataset --ckpt-dir ./runs/exp1
-```
-
-### Evaluate
-
-```bash
-python scripts/test_random.py --cache-dir ./cache_dataset \
-    --ckpt ./runs/exp1/best.pt --n-subjects 200 \
-    --exclude-splits ./runs/exp1/splits.json
-```
-
-`--exclude-splits` guarantees the evaluation subjects were never seen during training.
-Run `--help` on either script for the full option list.
-
-### Visualize attention
-
-```bash
-python scripts/visualize_attention.py --ckpt ./runs/exp1/best.pt --out-dir ./figures
-```
-
----
-
-## Notes and limitations
-
-- Results are reported on a single dataset; **cross-dataset generalization is not yet
-  evaluated**, and sleep-staging models are known to degrade across recording setups.
-- The electrode graph is fixed by anatomy rather than learned. This is a deliberate
-  inductive bias, but it assumes a standard 10–20 montage and does not adapt to unusual
-  channel configurations.
-- N1 recall (~0.59) remains the weakest point, consistent with the literature.
-- Trained checkpoints are not included in this repository.
 
 ## Acknowledgements
 
