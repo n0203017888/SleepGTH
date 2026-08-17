@@ -1,0 +1,44 @@
+# --- Data (165 GB of preprocessed PSG cache — never commit) ---
+cache_dataset/
+*.npy
+*.npz
+
+# --- Training artifacts ---
+checkpoints*/
+ckpt_*/
+train_bestweight/
+logs/
+splits/
+figures/
+figures_seed22/
+*.pt
+*.pth
+history.json
+splits.json
+
+# --- Private working notes (kept local) ---
+model.md
+implementation_details.md
+指令.md
+
+# --- Tooling ---
+.claude/
+.vscode/
+.idea/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# --- OS ---
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Figures deliberately published in the README are kept under assets/
+!assets/*.png

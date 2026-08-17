@@ -1,0 +1,9 @@
+# Tested on Python 3.10
+torch>=2.4
+numpy>=2.0
+scipy>=1.15
+scikit-learn>=1.7
+networkx>=3.4
+matplotlib>=3.10
+tqdm>=4.67
+wfdb>=4.3
