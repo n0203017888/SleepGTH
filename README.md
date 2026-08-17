@@ -154,7 +154,6 @@ scripts/
   train_single.py       training entry point
   test_random.py        evaluate on randomly sampled held-out subjects
   visualize_attention.py extract the attention figures shown above
-  apply_bandpass.py     signal preprocessing
   subset_cache.py       build a smaller cache for quick experiments
 utils/
   scheduler.py          warmup + cosine schedule
@@ -175,10 +174,11 @@ Tested on Python 3.10 with PyTorch 2.4 (CUDA).
 ### Data
 
 Download the [PhysioNet/CinC Challenge 2018](https://physionet.org/content/challenge-2018/)
-training set and build the local cache:
+training set and build the local cache. The cache builder extracts the 6 EEG channels,
+bandpass-filters them and stores one array per recording:
 
 ```bash
-python scripts/apply_bandpass.py --cache-dir ./cache_dataset
+python -m datasets.cinc2018 --data-root <PATH_TO_CinC2018>/training --out-dir ./cache_dataset
 ```
 
 The cache is large (hundreds of GB for the full set) and is not tracked by git.

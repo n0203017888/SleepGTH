@@ -1,7 +1,7 @@
 """Sleep-EEG augmentation transforms (training only — never apply to val/test).
 
 Each transform takes the dict returned by CinC2018EpochDataset
-    {'eeg': (C, 6000) or (L, C, 6000), 'eog': ..., 'emg': ..., 'label': int}
+    {'eeg': (C, 6000) or (L, C, 6000), 'label': int}
 and returns a new dict with augmented signals (label unchanged).
 """
 from __future__ import annotations
@@ -26,9 +26,7 @@ class GaussianNoise:
 
     def __call__(self, item: dict) -> dict:
         out = dict(item)
-        for k in ('eeg', 'eog', 'emg'):
-            if k not in item:                # eog_only datasets carry only 'eog'
-                continue
+        for k in ('eeg',):
             out[k] = item[k] + torch.randn_like(item[k]) * self.std
         return out
 
@@ -49,12 +47,10 @@ class TimeMask:
         if random.random() > self.p:
             return item
         out = dict(item)
-        T = next(item[k] for k in ('eeg', 'eog', 'emg') if k in item).shape[-1]
+        T = item['eeg'].shape[-1]
         win = random.randint(self.min_len, self.max_len)
         start = random.randint(0, T - win)
-        for k in ('eeg', 'eog', 'emg'):
-            if k not in item:                # eog_only datasets carry only 'eog'
-                continue
+        for k in ('eeg',):
             sig = item[k].clone()
             sig[..., start:start + win] = 0
             out[k] = sig
@@ -69,9 +65,7 @@ class ChannelDropout:
 
     def __call__(self, item: dict) -> dict:
         out = dict(item)
-        for k in ('eeg', 'eog', 'emg'):
-            if k not in item:                # eog_only datasets carry only 'eog'
-                continue
+        for k in ('eeg',):
             sig = item[k].clone()
             for c in range(sig.shape[0]):
                 if random.random() < self.p:
@@ -90,9 +84,7 @@ class AmplitudeScaling:
     def __call__(self, item: dict) -> dict:
         out = dict(item)
         scale = random.uniform(self.low, self.high)
-        for k in ('eeg', 'eog', 'emg'):
-            if k not in item:                # eog_only datasets carry only 'eog'
-                continue
+        for k in ('eeg',):
             out[k] = item[k] * scale
         return out
 
@@ -114,9 +106,7 @@ class RandomAmplitudeScale:
             return item
         out = dict(item)
         scale = random.uniform(self.low, self.high)
-        for k in ('eeg', 'eog', 'emg'):
-            if k not in item:                # eog_only datasets carry only 'eog'
-                continue
+        for k in ('eeg',):
             out[k] = item[k] * scale
         return out
 
@@ -137,9 +127,7 @@ class RandomTimeShift:
             return item
         out = dict(item)
         shift = random.randint(self.shift_range[0], self.shift_range[1])
-        for k in ('eeg', 'eog', 'emg'):
-            if k not in item:                # eog_only datasets carry only 'eog'
-                continue
+        for k in ('eeg',):
             out[k] = torch.roll(item[k], shift, dims=-1)
         return out
 
@@ -160,9 +148,7 @@ class RandomAmplitudeShift:
             return item
         out = dict(item)
         offset = random.uniform(self.low, self.high)
-        for k in ('eeg', 'eog', 'emg'):
-            if k not in item:                # eog_only datasets carry only 'eog'
-                continue
+        for k in ('eeg',):
             out[k] = item[k] + offset
         return out
 
@@ -184,11 +170,9 @@ class RandomZeroMasking:
         if win == 0:
             return item
         out = dict(item)
-        T = next(item[k] for k in ('eeg', 'eog', 'emg') if k in item).shape[-1]
+        T = item['eeg'].shape[-1]
         start = random.randint(0, max(0, T - win))
-        for k in ('eeg', 'eog', 'emg'):
-            if k not in item:                # eog_only datasets carry only 'eog'
-                continue
+        for k in ('eeg',):
             sig = item[k].clone()
             sig[..., start:start + win] = 0.0
             out[k] = sig
@@ -206,9 +190,7 @@ class RandomGaussianNoise:
         if random.random() > self.p:
             return item
         out = dict(item)
-        for k in ('eeg', 'eog', 'emg'):
-            if k not in item:                # eog_only datasets carry only 'eog'
-                continue
+        for k in ('eeg',):
             out[k] = item[k] + torch.randn_like(item[k]) * self.std
         return out
 
@@ -240,9 +222,7 @@ class RandomBandStopFilter:
         sos = butter(4, [low, high], btype='bandstop', fs=self.fs, output='sos')
 
         out = dict(item)
-        for k in ('eeg', 'eog', 'emg'):
-            if k not in item:                # eog_only datasets carry only 'eog'
-                continue
+        for k in ('eeg',):
             sig_np = item[k].numpy()
             filtered = sosfiltfilt(sos, sig_np, axis=-1).astype(np.float32)
             out[k] = torch.from_numpy(filtered)

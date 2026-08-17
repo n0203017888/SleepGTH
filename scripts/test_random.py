@@ -40,23 +40,6 @@ def main():
                    help='Number of subjects to randomly sample.')
     p.add_argument('--context-size', type=int, default=5)
     p.add_argument('--batch-size', type=int, default=32)
-    p.add_argument('--modalities', choices=['eeg', 'eeg_eog', 'eeg_eog_emg'], default='eeg')
-    p.add_argument('--use-eog', action='store_true', default=False,
-                   help='Enable epoch-level EOGEncoder (must match training config).')
-    p.add_argument('--fusion', choices=['concat', 'hwgate'], default='concat',
-                   help='EOG fusion type (must match the checkpoint training config).')
-    p.add_argument('--eog-dim', type=int, default=64,
-                   help='EOGEncoder output dim (must match the checkpoint training config).')
-    p.add_argument('--eog-kernels', type=int, nargs=2, default=(11, 201), metavar=('SHORT', 'LONG'),
-                   help='EOGEncoder two-branch kernel sizes (must match training config).')
-    p.add_argument('--fusion-level', choices=['epoch', 'patch'], default='epoch',
-                   help='EOG/EMG fusion level (must match the checkpoint training config).')
-    p.add_argument('--use-emg', action='store_true', default=False,
-                   help='Enable epoch-level EMG encoder (must match training config).')
-    p.add_argument('--emg-dim', type=int, default=16,
-                   help='EMG encoder output dim (must match training config).')
-    p.add_argument('--emg-kernels', type=int, nargs=2, default=(11, 201), metavar=('SHORT', 'LONG'),
-                   help='EMG encoder two-branch kernel sizes (must match training config).')
     p.add_argument('--readout', choices=['fusion', 'global'], default='fusion',
                    help='Patch-token readout (must match training config).')
     p.add_argument('--no-gnn', dest='use_gnn', action='store_false', default=True,
@@ -92,26 +75,15 @@ def main():
     chosen = rng.choice(all_records, size=args.n_subjects, replace=False).tolist()
     print(f'sampled {len(chosen)} subjects (seed={args.seed})')
 
-    # Only preload channels the model uses (saves RAM)
-    load_eog = args.modalities in ('eeg_eog', 'eeg_eog_emg') or args.use_eog
-    load_emg = args.modalities == 'eeg_eog_emg' or args.use_emg
     ds = CinC2018EpochDataset(args.cache_dir, record_ids=chosen,
-                              context_size=args.context_size,
-                              load_eog=load_eog, load_emg=load_emg)
+                              context_size=args.context_size)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                         num_workers=0, pin_memory=True)
     print(f'dataset : {len(ds):,} epochs')
 
     # 建立模型並載入權重
-    use_eog = args.modalities in ('eeg_eog', 'eeg_eog_emg')
-    use_emg = args.modalities == 'eeg_eog_emg'
-    model = SleepGTH(use_eog=use_eog, use_emg=use_emg,
-                         use_eog_encoder=args.use_eog, use_emg_encoder=args.use_emg,
-                         fusion=args.fusion, eog_dim=args.eog_dim, emg_dim=args.emg_dim,
-                         eog_kernels=tuple(args.eog_kernels), emg_kernels=tuple(args.emg_kernels),
-                         fusion_level=args.fusion_level,
-                         use_gnn=args.use_gnn, use_vit=args.use_vit, readout=args.readout,
-                         context_size=args.context_size).to(device)
+    model = SleepGTH(use_gnn=args.use_gnn, use_vit=args.use_vit, readout=args.readout,
+                     context_size=args.context_size).to(device)
     ckpt = torch.load(args.ckpt, map_location=device)
     # strict=False tolerates checkpoints trained before the patch_head/continuity removal
     # (extra 'temporal.patch_head.*' keys). Shape mismatches still raise.

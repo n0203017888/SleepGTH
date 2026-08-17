@@ -11,7 +11,7 @@ Use in code:
     from datasets.cinc2018 import CinC2018EpochDataset
     ds = CinC2018EpochDataset('./cache_dataset')
     item = ds[0]
-    # item = {'eeg': (6, 6000), 'eog': (1, 6000), 'emg': (1, 6000), 'label': int}
+    # item = {'eeg': (6, 6000), 'label': int}
 """
 from __future__ import annotations
 
@@ -27,23 +27,16 @@ from tqdm import tqdm
 
 
 EEG_CHANNELS = ['F3-M2', 'F4-M1', 'C3-M2', 'C4-M1', 'O1-M2', 'O2-M1']
-EOG_CHANNELS = ['E1-M2']
-EMG_CHANNELS = ['Chin1-Chin2']
-TARGET_CHANNELS = EEG_CHANNELS + EOG_CHANNELS + EMG_CHANNELS
+TARGET_CHANNELS = EEG_CHANNELS
 
 N_EEG = len(EEG_CHANNELS)
-N_EOG = len(EOG_CHANNELS)
-N_EMG = len(EMG_CHANNELS)
 
 FS = 200
 EPOCH_SEC = 30
 EPOCH_LEN = FS * EPOCH_SEC
 
-# Paper-compliant bandpass cutoffs.
-# EEG / EOG: 0.3-35 Hz. EMG: 10 Hz HP + 95 Hz LP (paper used 100 Hz at fs=256;
-# at fs=200 Nyquist=100, so we cap to 95 Hz to keep the filter well-defined).
-EEG_EOG_BAND = (0.3, 35.0)
-EMG_BAND = (10.0, 95.0)
+# Paper-compliant bandpass cutoffs for EEG.
+EEG_BAND = (0.3, 35.0)
 FILTER_ORDER = 4
 
 STAGE_TO_LABEL = {'W': 0, 'N1': 1, 'N2': 2, 'N3': 3, 'R': 4}
@@ -92,11 +85,9 @@ def _process_record(record_path: Path, out_dir: Path) -> tuple[np.ndarray, bool]
     col_idx = [name_to_idx[c] for c in TARGET_CHANNELS]
     sig = rec.p_signal[:, col_idx].astype(np.float32)
 
-    # Bandpass filter along time axis (paper: EEG/EOG 0.3-35 Hz, EMG 10-95 Hz at fs=200).
+    # Bandpass filter along time axis (paper: EEG 0.3-35 Hz at fs=200).
     sig_t = sig.T  # (n_channels, T)
-    n_eeg_eog = N_EEG + N_EOG
-    sig_t[:n_eeg_eog] = _bandpass(sig_t[:n_eeg_eog], *EEG_EOG_BAND)
-    sig_t[n_eeg_eog:] = _bandpass(sig_t[n_eeg_eog:], *EMG_BAND)
+    sig_t[:] = _bandpass(sig_t, *EEG_BAND)
     sig = sig_t.T
 
     sig = (sig - sig.mean(axis=0, keepdims=True)) / (sig.std(axis=0, keepdims=True) + 1e-6)
@@ -164,29 +155,12 @@ class CinC2018EpochDataset(Dataset):
     """
 
     def __init__(self, cache_dir: str | Path, record_ids: list[str] | None = None,
-                 transform=None, context_size: int = 1, eog_only: bool = False,
-                 load_eog: bool = True, load_emg: bool = True):
+                 transform=None, context_size: int = 1):
         if context_size < 1 or context_size % 2 == 0:
             raise ValueError(f'context_size must be a positive odd integer, got {context_size}')
         self.cache_dir = Path(cache_dir)
         self.transform = transform
         self.context_size = context_size
-        # eog_only: preload ONLY the EOG channel (skip 6 EEG + 1 EMG), return {'eog','label'}.
-        # Otherwise EEG is always loaded; EOG/EMG are loaded only if requested, to cut RAM.
-        # Channels are stored in order [EEG, EOG, EMG], so dropping unused trailing channels
-        # is a simple prefix slice (e.g. EEG+EOG only = first 7 channels, drops EMG).
-        self.eog_only = eog_only
-        self.has_eog = (load_eog or load_emg) and not eog_only   # EMG sits after EOG -> keep EOG too
-        self.has_emg = load_emg and not eog_only
-        if eog_only:
-            n_keep = N_EOG                                       # only EOG stored
-        elif self.has_emg:
-            n_keep = N_EEG + N_EOG + N_EMG                       # EEG+EOG+EMG
-        elif self.has_eog:
-            n_keep = N_EEG + N_EOG                               # EEG+EOG (drop EMG)
-        else:
-            n_keep = N_EEG                                       # EEG only
-        self.n_keep = n_keep
         idx = np.load(self.cache_dir / 'index.npz', allow_pickle=False)
         rec, ep, lb = idx['record_ids'], idx['epoch_idx'], idx['labels']
         if record_ids is not None:
@@ -200,21 +174,20 @@ class CinC2018EpochDataset(Dataset):
         self.signals: dict[str, np.ndarray] = {}
         for rid in tqdm(unique, desc=f'preloading {len(unique)} subjects', leave=False):
             arr = np.load(self.cache_dir / f'{rid}_signal.npy')  # (n_epochs, n_ch, 6000)
-            if arr.shape[1] < N_EEG + N_EOG:
+            if arr.shape[1] < N_EEG:
                 raise RuntimeError(
                     f'Cache for {rid!r} has only {arr.shape[1]} stored channels, '
-                    f'but {N_EEG + N_EOG} (EEG+EOG) are required. '
+                    f'but {N_EEG} EEG channels are required. '
                     f'Please rebuild the cache:\n'
                     f'  python -m datasets.cinc2018 --data-root <DATA_ROOT> '
                     f'--out-dir {self.cache_dir}'
                 )
-            if eog_only:
-                # Keep only the EOG channel; copy so the full array is freed from RAM.
-                arr = np.ascontiguousarray(arr[:, N_EEG:N_EEG + N_EOG, :])  # (n_epochs, N_EOG, 6000)
-            elif n_keep < arr.shape[1]:
-                # Drop unused trailing channels (e.g. EMG) — copy so the rest is freed from RAM.
-                arr = np.ascontiguousarray(arr[:, :n_keep, :])   # (n_epochs, n_keep, 6000)
-            self.signals[rid] = arr  # (n_epochs, n_keep, 6000)
+            if arr.shape[1] > N_EEG:
+                # Caches built before the EEG-only refactor store extra trailing channels.
+                # EEG comes first, so a prefix slice is all that is needed; copy so the
+                # rest of the array is freed from RAM.
+                arr = np.ascontiguousarray(arr[:, :N_EEG, :])    # (n_epochs, N_EEG, 6000)
+            self.signals[rid] = arr  # (n_epochs, N_EEG, 6000)
 
     def __len__(self) -> int:
         return len(self.labels)
@@ -222,20 +195,12 @@ class CinC2018EpochDataset(Dataset):
     def __getitem__(self, i: int) -> dict:
         rid = str(self.record_ids[i])
         ep = int(self.epoch_idx[i])
-        signals = self.signals[rid]                              # (n_epochs_total, 8, 6000)
+        signals = self.signals[rid]                              # (n_epochs_total, N_EEG, 6000)
 
         if self.context_size == 1:
-            sig = signals[ep]                                    # (n_keep, 6000)
-            if self.eog_only:
-                item = {'eog': torch.from_numpy(sig[:N_EOG].copy()).float(),    # (1, 6000)
-                        'label': int(self.labels[i])}
-            else:
-                item = {'eeg': torch.from_numpy(sig[:N_EEG].copy()).float(),
-                        'label': int(self.labels[i])}
-                if self.has_eog:
-                    item['eog'] = torch.from_numpy(sig[N_EEG:N_EEG + N_EOG].copy()).float()
-                if self.has_emg:
-                    item['emg'] = torch.from_numpy(sig[N_EEG + N_EOG:N_EEG + N_EOG + N_EMG].copy()).float()
+            sig = signals[ep]                                    # (N_EEG, 6000)
+            item = {'eeg': torch.from_numpy(sig[:N_EEG].copy()).float(),
+                    'label': int(self.labels[i])}
         else:
             half = self.context_size // 2
             start, end = ep - half, ep + half + 1                # half-open [start, end)
@@ -245,17 +210,9 @@ class CinC2018EpochDataset(Dataset):
             v_start = max(start, 0)
             v_end = min(end, n_total)
             ctx[v_start - start:v_end - start] = signals[v_start:v_end]
-            # ctx: (L, n_keep, 6000) — zero-padded on boundary epochs
-            if self.eog_only:
-                item = {'eog': torch.from_numpy(ctx[:, :N_EOG, :].copy()).float(),   # (L, 1, 6000)
-                        'label': int(self.labels[i])}            # center epoch's label
-            else:
-                item = {'eeg': torch.from_numpy(ctx[:, :N_EEG, :].copy()).float(),
-                        'label': int(self.labels[i])}            # center epoch's label
-                if self.has_eog:
-                    item['eog'] = torch.from_numpy(ctx[:, N_EEG:N_EEG + N_EOG, :].copy()).float()
-                if self.has_emg:
-                    item['emg'] = torch.from_numpy(ctx[:, N_EEG + N_EOG:N_EEG + N_EOG + N_EMG, :].copy()).float()
+            # ctx: (L, N_EEG, 6000) — zero-padded on boundary epochs
+            item = {'eeg': torch.from_numpy(ctx[:, :N_EEG, :].copy()).float(),
+                    'label': int(self.labels[i])}                # center epoch's label
         if self.transform is not None:
             item = self.transform(item)
         return item

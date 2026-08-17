@@ -1,14 +1,15 @@
 """SleepGTH Spatial Encoder (per-patch, CinC 2018 200 Hz setup).
 
-Per-patch input shape:  (B, 8, L_p=200)  channels = [6 EEG, 1 EOG, 1 EMG]
-Per-patch output shape: (B, d_node=64)   learnable Linear(n_ch->1) fusion
+EEG-only: the 6 scalp electrodes are the graph nodes.
+
+Per-patch input shape:  (B, 6, L_p=200)  channels = 6 EEG
+Per-patch output shape: (B, d_node=64)
 
 Pipeline:
     EEG  (B, 6, 200) --NodeEncoder (Conv1d x2 + Pool)--> (B, 6, 64)
                      --GTN (2 layers, masked attn, d=64)--> (B, 6, 64)
-    EOG  (B, 1, 200) --MLPEncoder (200->64, proj-residual)--> (B, 1, 64)
-    EMG  (B, 1, 200) --MLPEncoder (200->64, proj-residual)--> (B, 1, 64)
-    fuse: cat -> (B, 8, 64), Linear(8->1) over channel axis -> (B, 64)
+    readout='global': take the GTN global node            -> (B, 64)
+    readout='fusion': Linear(6->1) over the channel axis  -> (B, 64)
 """
 from __future__ import annotations
 
@@ -222,84 +223,6 @@ class MultiScaleNodeEncoder(nn.Module):
         return x.reshape(b, self.n_patches, self.n_eeg, self.d_node)
 
 
-class EOGEncoder(nn.Module):
-    """Full-length EOG signal encoder: (B, 1, 6000) -> (B, out_dim).
-
-    Two parallel _Branch blocks capture short-range (k=11) and long-range (k=201)
-    patterns. A projection-residual integration conv (2H->H) fuses them, then
-    mean+max pooling yields a 2H feature that the final Linear projects to out_dim.
-
-    out_dim controls the EOG footprint in the fusion concat (smaller = EOG gets a
-    smaller share, matching its 1-channel info content vs the 6-channel EEG).
-    """
-
-    def __init__(self, hidden: int = 32, out_dim: int = 64, dropout: float = 0.2,
-                 kernels: tuple[int, int] = (11, 201),
-                 n_patches: int = 0, l_p: int = 200):
-        super().__init__()
-        # n_patches=0: pool the whole 6000 -> (B, out_dim)  [epoch-level fusion]
-        # n_patches>0: patchify into n_patches and pool within each -> (B, n_patches, out_dim)
-        #              [patch-level fusion: 30 EOG tokens, time-aligned with EEG patches]
-        self.n_patches = n_patches
-        self.l_p = l_p
-        # Reuse the shared _Branch class — no separate definition needed.
-        # kernels = (short, long) receptive fields. At 200 Hz: 11=~0.1s, 201=~1s.
-        # Eye movements span ~0.1s (blink/saccade) to ~4s (slow eye movement), so a
-        # larger short (e.g. 51=0.25s) + larger long (e.g. 401=2s) may fit EOG better.
-        k_short, k_long = kernels
-        self.branch_a = _Branch(1, hidden, kernel1=k_short)   # short-range: (B,1,6000)->(B,H,6000)
-        self.branch_b = _Branch(1, hidden, kernel1=k_long)    # long-range:  (B,1,6000)->(B,H,6000)
-        # Projection-residual integration: (B, 2H, 6000) -> (B, H, 6000)
-        self.shortcut    = nn.Conv1d(2 * hidden, hidden, kernel_size=1)
-        self.integration = nn.Conv1d(2 * hidden, hidden, kernel_size=11, padding=5)
-        self.bn_int      = nn.BatchNorm1d(hidden)
-        self.dropout     = nn.Dropout(dropout)
-        # mean+max pool gives 2H; project to out_dim (decoupled from hidden)
-        self.proj = nn.Linear(2 * hidden, out_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 1, 6000)
-        a   = self.branch_a(x)                                      # (B, H, 6000)
-        b   = self.branch_b(x)                                      # (B, H, 6000)
-        cat = torch.cat([a, b], dim=1)                              # (B, 2H, 6000)
-        h   = self.bn_int(self.integration(cat))                    # (B, H, 6000)
-        x   = F.gelu(h + self.shortcut(cat))                        # (B, H, 6000)
-        x   = self.dropout(x)
-        if self.n_patches > 0:
-            # patchify time axis: (B, H, 6000) -> (B, H, n_patches, l_p), pool within each patch
-            b, hdim = x.shape[0], x.shape[1]
-            xp = x.reshape(b, hdim, self.n_patches, self.l_p)
-            mean_f = xp.mean(dim=-1)                                 # (B, H, n_patches)
-            max_f  = xp.amax(dim=-1)                                 # (B, H, n_patches)
-            feat = torch.cat([mean_f, max_f], dim=1).transpose(1, 2) # (B, n_patches, 2H)
-            return self.proj(feat)                                   # (B, n_patches, out_dim)
-        mean_f = F.adaptive_avg_pool1d(x, 1).squeeze(-1)            # (B, H)
-        max_f  = F.adaptive_max_pool1d(x, 1).squeeze(-1)            # (B, H)
-        feat = torch.cat([mean_f, max_f], dim=-1)                   # (B, 2H)
-        return self.proj(feat)                                       # (B, out_dim)
-
-
-class MLPEncoder(nn.Module):
-    """Projection-residual MLP: (B, n_ch, l_p) -> (B, n_ch, d_out).
-
-    Since l_p != d_out, the skip uses a learned projection:
-        h    = ReLU(fc2(ReLU(fc1(x))))
-        skip = proj(x)
-        out  = h + skip
-    """
-
-    def __init__(self, l_p: int = 200, d_out: int = 64):
-        super().__init__()
-        self.fc1  = nn.Linear(l_p, d_out)
-        self.fc2  = nn.Linear(d_out, d_out)
-        self.proj = nn.Linear(l_p, d_out)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = torch.relu(self.fc1(x))
-        h = torch.relu(self.fc2(h))
-        return h + self.proj(x)
-
-
 # --------------------------------------------------------------------------- #
 # Graph Transformer Network
 # --------------------------------------------------------------------------- #
@@ -407,64 +330,49 @@ class EEGGraphEncoder(nn.Module):
 # --------------------------------------------------------------------------- #
 
 class SpatialEncoder(nn.Module):
-    """Per-patch spatial encoder with learnable Source Fusion.
+    """Per-patch spatial encoder over the EEG electrode graph.
 
-    Input:  (B, n_ch, L_p=200)
-    Output: (B, d_node=64)     Linear(n_ch->1) fusion over channel axis
+    Input:  (B, n_eeg, L_p=200)
+    Output: (B, d_node=64)
     """
 
-    def __init__(self, n_eeg: int = 6, n_eog: int = 1, n_emg: int = 1,
+    def __init__(self, n_eeg: int = 6,
                  l_p: int = 200, d_node: int = 64, d_reg: int = 4,
                  num_layers: int = 2, num_heads: int = 4, d_attn: int = 16,
                  conv_hidden: int = 32, conv_kernel1: int = 19, conv_kernel2: int = 7,
                  n_pool: int = 8, seed: int = 0, use_gnn: bool = True,
                  readout: str = 'fusion'):
         super().__init__()
-        # readout='fusion': Linear(n_ch->1) static channel fusion over the electrodes.
-        # readout='global': use the GTN global node as the patch token (requires use_gnn=True,
-        #                   EEG-only — the global node summarizes the EEG graph).
+        # readout='fusion': Linear(n_eeg->1) static channel fusion over the electrodes.
+        # readout='global': use the GTN global node as the patch token (requires use_gnn=True).
         if readout not in ('fusion', 'global'):
             raise ValueError(f"readout must be 'fusion' or 'global', got {readout!r}")
-        if readout == 'global':
-            if not use_gnn:
-                raise ValueError("readout='global' requires use_gnn=True (no global node without GTN)")
-            if n_eog > 0 or n_emg > 0:
-                raise ValueError("readout='global' is EEG-only; the global node summarizes the "
-                                 "EEG electrode graph, so EOG/EMG channels are not supported.")
+        if readout == 'global' and not use_gnn:
+            raise ValueError("readout='global' requires use_gnn=True (no global node without GTN)")
         self.readout = readout
         self.n_eeg = n_eeg
-        self.n_eog = n_eog
-        self.n_emg = n_emg
-        self.n_channels = n_eeg + n_eog + n_emg
+        self.n_channels = n_eeg
         self.eeg = EEGGraphEncoder(
             n_eeg=n_eeg, d_reg=d_reg, l_p=l_p, d_node=d_node,
             num_layers=num_layers, num_heads=num_heads, d_attn=d_attn,
             conv_hidden=conv_hidden, conv_kernel1=conv_kernel1, conv_kernel2=conv_kernel2,
             n_pool=n_pool, seed=seed, use_gnn=use_gnn,
         )
-        self.eog = MLPEncoder(l_p=l_p, d_out=d_node) if n_eog > 0 else None
-        self.emg = MLPEncoder(l_p=l_p, d_out=d_node) if n_emg > 0 else None
         self.fuse = nn.Linear(self.n_channels, 1) if readout == 'fusion' else None
 
     def forward(self, x: torch.Tensor, eeg_nodes: torch.Tensor | None = None) -> torch.Tensor:
         """If ``eeg_nodes`` is provided (B*30, n_eeg, d_node), skip the per-patch
-        NodeEncoder and feed them straight into the GTN. EOG/EMG still take their
-        raw patch slices from ``x``.
+        NodeEncoder and feed them straight into the GTN.
         """
         if self.readout == 'global':
-            # global node IS the patch token (EEG-only, use_gnn=True enforced at init)
+            # global node IS the patch token (use_gnn=True enforced at init)
             if eeg_nodes is not None:
                 return self.eeg.apply_gtn(eeg_nodes, return_global=True)   # (B, d_node)
             return self.eeg(x[:, :self.n_eeg], return_global=True)         # (B, d_node)
 
-        # 'fusion' readout: GTN-refined electrodes (+ EOG/EMG) -> Linear(n_ch->1)
+        # 'fusion' readout: GTN-refined electrodes -> Linear(n_eeg->1)
         if eeg_nodes is not None:
-            parts = [self.eeg.apply_gtn(eeg_nodes)]
+            h = self.eeg.apply_gtn(eeg_nodes)    # (B, n_eeg, d_node)
         else:
-            parts = [self.eeg(x[:, :self.n_eeg])]
-        if self.eog is not None:
-            parts.append(self.eog(x[:, self.n_eeg:self.n_eeg + self.n_eog]))
-        if self.emg is not None:
-            parts.append(self.emg(x[:, self.n_eeg + self.n_eog:]))
-        h = torch.cat(parts, dim=1)              # (B, n_ch, d_node)
+            h = self.eeg(x[:, :self.n_eeg])      # (B, n_eeg, d_node)
         return self.fuse(h.transpose(1, 2)).squeeze(-1)   # (B, d_node)

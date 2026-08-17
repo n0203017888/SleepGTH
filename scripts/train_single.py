@@ -93,7 +93,6 @@ def main():
     p.add_argument('--amp', action='store_true')
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--context-size', type=int, default=1)
-    p.add_argument('--modalities', choices=['eeg', 'eeg_eog', 'eeg_eog_emg'], default='eeg')
     p.add_argument('--use-class-weights', action='store_true')
     p.add_argument('--class-weights', type=float, nargs=5, default=None,
                    metavar=('W', 'N1', 'N2', 'N3', 'R'))
@@ -110,39 +109,14 @@ def main():
     p.add_argument('--no-deep-branch', dest='deep_branch', action='store_false')
     # --- architecture ablations ---
     p.add_argument('--readout', choices=['fusion', 'global'], default='fusion',
-                   help="Patch-token readout. fusion = Linear(n_ch->1) over electrodes (default); "
-                        "global = use the GTN global node as the token (EEG-only, requires GNN).")
+                   help="Patch-token readout. fusion = Linear(n_eeg->1) over electrodes (default); "
+                        "global = use the GTN global node as the token (requires GNN).")
     p.add_argument('--no-gnn', dest='use_gnn', action='store_false', default=True,
                    help='Ablation: remove the GNN (GTN graph attention over electrodes); '
-                        'node embeddings go straight to Source Fusion.')
+                        'node embeddings go straight to the readout.')
     p.add_argument('--no-vit', dest='use_vit', action='store_false', default=True,
                    help='Ablation: remove the TemporalViT (within-epoch patch transformer); '
                         '30 patch tokens are GAP-pooled directly into epoch_feat.')
-    p.add_argument('--use-eog', action='store_true', default=False,
-                   help='Enable epoch-level EOGEncoder (full 6000-sample EOG fused with EEG epoch_feat).')
-    p.add_argument('--eog-only', action='store_true', default=False,
-                   help='Diagnostic: bypass the EEG pipeline entirely and classify from EOG alone '
-                        '(EOGEncoder + SequenceTransformer if ctx>1). Use to measure EOG signal.')
-    p.add_argument('--fusion', choices=['concat', 'hwgate'], default='concat',
-                   help='EOG fusion type (only used with --use-eog). '
-                        'concat = GELU(Linear(cat(eeg,eog))); '
-                        'hwgate = gate*mix + (1-gate)*eeg (selective, avoids N2/N3 pollution).')
-    p.add_argument('--eog-dim', type=int, default=64,
-                   help='EOGEncoder output dim (EOG footprint in the fusion concat). '
-                        'Smaller (e.g. 16/32) matches EOG 1-channel info content vs 6-channel EEG.')
-    p.add_argument('--eog-kernels', type=int, nargs=2, default=(11, 201), metavar=('SHORT', 'LONG'),
-                   help='EOGEncoder two-branch kernel sizes (short, long) at 200Hz. '
-                        'Default 11(~0.1s)/201(~1s); try 51(~0.25s)/401(~2s) to fit eye-movement scales.')
-    p.add_argument('--fusion-level', choices=['epoch', 'patch'], default='epoch',
-                   help='Where to fuse EOG/EMG. epoch = after TemporalViT (aux=1 vector, default); '
-                        'patch = before TemporalViT (aux=30 tokens, joins temporal modeling).')
-    p.add_argument('--use-emg', action='store_true', default=False,
-                   help='Enable epoch-level EMG encoder (chin EMG, mirrors --use-eog). '
-                        'EMG carries muscle tone (REM atonia / Wake high tone).')
-    p.add_argument('--emg-dim', type=int, default=16,
-                   help='EMG encoder output dim (EMG footprint in the fusion). Default 16 (like EOG).')
-    p.add_argument('--emg-kernels', type=int, nargs=2, default=(11, 201), metavar=('SHORT', 'LONG'),
-                   help='EMG encoder two-branch kernel sizes.')
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -177,16 +151,10 @@ def main():
     else:
         train_aug = None
 
-    # Only preload channels the model actually uses (saves RAM; e.g. drop EMG if unused).
-    load_eog = args.modalities in ('eeg_eog', 'eeg_eog_emg') or args.use_eog
-    load_emg = args.modalities == 'eeg_eog_emg' or args.use_emg
-    print(f'load channels: EEG=1 EOG={int(load_eog)} EMG={int(load_emg)}')
     train_ds = CinC2018EpochDataset(args.cache_dir, record_ids=split['train'],
-                                    transform=train_aug, context_size=args.context_size,
-                                    eog_only=args.eog_only, load_eog=load_eog, load_emg=load_emg)
+                                    transform=train_aug, context_size=args.context_size)
     val_ds   = CinC2018EpochDataset(args.cache_dir, record_ids=split['val'],
-                                    context_size=args.context_size,
-                                    eog_only=args.eog_only, load_eog=load_eog, load_emg=load_emg)
+                                    context_size=args.context_size)
     print(f'train epochs={len(train_ds):,}  val epochs={len(val_ds):,}')
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
@@ -197,18 +165,10 @@ def main():
                             num_workers=0, pin_memory=True)
 
     # --- model ---
-    use_eog_spatial = args.modalities in ('eeg_eog', 'eeg_eog_emg')
-    use_emg_spatial = args.modalities == 'eeg_eog_emg'
-    model = SleepGTH(use_eog=use_eog_spatial, use_emg=use_emg_spatial,
-                         use_eog_encoder=args.use_eog, use_emg_encoder=args.use_emg,
-                         eog_only=args.eog_only,
-                         fusion=args.fusion, eog_dim=args.eog_dim, emg_dim=args.emg_dim,
-                         eog_kernels=tuple(args.eog_kernels), emg_kernels=tuple(args.emg_kernels),
-                         fusion_level=args.fusion_level,
-                         pool_type=args.pool_type,
-                         deep_branch=args.deep_branch,
-                         use_gnn=args.use_gnn, use_vit=args.use_vit, readout=args.readout,
-                         context_size=args.context_size).to(device)
+    model = SleepGTH(pool_type=args.pool_type,
+                     deep_branch=args.deep_branch,
+                     use_gnn=args.use_gnn, use_vit=args.use_vit, readout=args.readout,
+                     context_size=args.context_size).to(device)
     print(f'ablation: use_gnn={args.use_gnn}  use_vit={args.use_vit}  readout={args.readout}')
 
     # --- class weights ---

@@ -139,11 +139,9 @@ def build_model(ckpt_path, context_size, device):
           f'sequence={has_seq} (context_size={context_size})')
     if has_seq and context_size == 1:
         print('  [warn] checkpoint has a SequenceTransformer but context_size=1; '
-              'pass --context-size 7 to match the EEG-only Full model.')
-    model = SleepGTH(use_eog=False, use_emg=False,
-                        use_eog_encoder=False, use_emg_encoder=False,
-                        use_gnn=use_gnn, use_vit=use_vit, readout=readout,
-                        context_size=context_size).to(device)
+              'pass --context-size 7 to match the Full model.')
+    model = SleepGTH(use_gnn=use_gnn, use_vit=use_vit, readout=readout,
+                     context_size=context_size).to(device)
     missing, unexpected = model.load_state_dict(sd, strict=False)
     if missing or unexpected:
         print(f'[load_state_dict] missing={missing}  unexpected={unexpected}')
@@ -441,8 +439,7 @@ def main():
                         replace=False).tolist()
 
     ds = CinC2018EpochDataset(args.cache_dir, record_ids=chosen,
-                              context_size=args.context_size,
-                              load_eog=False, load_emg=False)
+                              context_size=args.context_size)
     print(f'dataset : {len(ds):,} epochs from {len(chosen)} subjects')
 
     model = build_model(args.ckpt, args.context_size, device)
