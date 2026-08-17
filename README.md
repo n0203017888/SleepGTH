@@ -165,7 +165,7 @@ utils/
 ## Setup
 
 ```bash
-git clone https://github.com/<your-username>/SleepGTH.git
+git clone https://github.com/n0203017888/SleepGTH.git
 cd SleepGTH
 pip install -r requirements.txt
 ```
