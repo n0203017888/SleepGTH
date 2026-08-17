@@ -24,8 +24,12 @@ flows along physically meaningful connections rather than through a dense mixing
 ## Results
 
 Evaluated on the [PhysioNet/CinC Challenge 2018](https://physionet.org/content/challenge-2018/)
-dataset, using **6 EEG channels only** (F3, F4, C3, C4, O1, O2). Train, validation and test
-subjects are disjoint — no recording is ever split across sets.
+dataset, using **6 EEG channels only** (F3, F4, C3, C4, O1, O2).
+
+Splitting is **subject-level**: of the 994 usable recordings, 450 are used for training and
+70 for validation, and the test subjects are sampled from the 474 recordings that were never
+seen during training. No recording is ever split across sets, so no subject contributes
+epochs to more than one set.
 
 **Best model — 200 held-out test subjects (~200k epochs):**
 
